@@ -1,0 +1,28 @@
+services:
+  n8n:
+    image: n8nio/n8n:latest
+    container_name: n8n
+    restart: unless-stopped
+    ports:
+      - "5678:5678"
+    environment:
+      - N8N_ENCRYPTION_KEY=${N8N_ENCRYPTION_KEY}
+      - GENERIC_TIMEZONE=Europe/Warsaw
+      - TZ=Europe/Warsaw
+      # Traccar
+      - TRACCAR_URL=${TRACCAR_URL}
+      - TRACCAR_DEVICE_ID=${TRACCAR_DEVICE_ID}
+      - TRACCAR_USERNAME=${TRACCAR_USERNAME}
+      - TRACCAR_PASSWORD=${TRACCAR_PASSWORD}
+      # Telegram
+      - TELEGRAM_BOT_TOKEN=${TELEGRAM_BOT_TOKEN}
+      - TELEGRAM_CHAT_ID=${TELEGRAM_CHAT_ID}
+      # Цена дизеля (PLN/литр)
+      - DIESEL_PRICE_PLN=${DIESEL_PRICE_PLN:-6.50}
+      # Средний расход л/100км (если OBD не передаёт spentFuel)
+      - FUEL_L100KM=${FUEL_L100KM:-7.0}
+    volumes:
+      - n8n_data:/home/node/.n8n
+
+volumes:
+  n8n_data:

@@ -1,0 +1,193 @@
+{
+  "name": "Car Trip Notifier",
+  "nodes": [
+    {
+      "parameters": {
+        "rule": {
+          "interval": [
+            {
+              "field": "minutes",
+              "minutesInterval": 15
+            }
+          ]
+        }
+      },
+      "id": "e5e7a2c4-1f3b-4d8a-9c6e-2b0f7d5a8e1c",
+      "name": "Every 15 Minutes",
+      "type": "n8n-nodes-base.scheduleTrigger",
+      "typeVersion": 1.2,
+      "position": [0, 300]
+    },
+    {
+      "parameters": {
+        "mode": "runOnceForAllItems",
+        "jsCode": "// Готовим Basic Auth и временной диапазон для запроса к Traccar\nconst username = process.env.TRACCAR_USERNAME || '';\nconst password = process.env.TRACCAR_PASSWORD || '';\nconst auth = Buffer.from(`${username}:${password}`).toString('base64');\n\nconst now = new Date();\n// Смотрим назад на 48 часов — подхватит поездки если n8n был недоступен\nconst from = new Date(now.getTime() - 48 * 60 * 60 * 1000).toISOString();\nconst to = now.toISOString();\n\nreturn [{\n  json: {\n    auth_header: `Basic ${auth}`,\n    device_id: process.env.TRACCAR_DEVICE_ID || '',\n    traccar_url: (process.env.TRACCAR_URL || '').replace(/\\/$/, ''),\n    from_time: from,\n    to_time: to\n  }\n}];"
+      },
+      "id": "a1b2c3d4-e5f6-7890-abcd-ef1234567890",
+      "name": "Prepare Request",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [220, 300]
+    },
+    {
+      "parameters": {
+        "method": "GET",
+        "url": "={{ $json.traccar_url }}/api/reports/trips",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            {
+              "name": "Authorization",
+              "value": "={{ $json.auth_header }}"
+            },
+            {
+              "name": "Accept",
+              "value": "application/json"
+            }
+          ]
+        },
+        "sendQuery": true,
+        "queryParameters": {
+          "parameters": [
+            {
+              "name": "deviceId",
+              "value": "={{ $json.device_id }}"
+            },
+            {
+              "name": "from",
+              "value": "={{ $json.from_time }}"
+            },
+            {
+              "name": "to",
+              "value": "={{ $json.to_time }}"
+            }
+          ]
+        },
+        "options": {}
+      },
+      "id": "b3c4d5e6-f7a8-9012-bcde-f23456789012",
+      "name": "Get Traccar Trips",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [440, 300]
+    },
+    {
+      "parameters": {
+        "mode": "runOnceForAllItems",
+        "jsCode": "// Фильтруем поездки, которые уже отправляли в Telegram\n// Используем n8n Workflow Static Data (хранится в SQLite внутри n8n)\nconst responseData = $input.first().json;\nconst trips = Array.isArray(responseData) ? responseData : [];\n\nif (trips.length === 0) {\n  return [];\n}\n\nconst staticData = $getWorkflowStaticData('global');\nif (!staticData.sentTripKeys) {\n  staticData.sentTripKeys = [];\n}\n\nconst sentKeys = new Set(staticData.sentTripKeys);\n\n// Уникальный ключ: deviceId + время начала поездки\nconst newTrips = trips.filter(trip => {\n  const key = `${trip.deviceId}_${trip.startTime}`;\n  return !sentKeys.has(key);\n});\n\nif (newTrips.length === 0) {\n  return [];\n}\n\n// Помечаем как отправленные\nnewTrips.forEach(trip => {\n  sentKeys.add(`${trip.deviceId}_${trip.startTime}`);\n});\n\n// Оставляем последние 500 ключей\nstaticData.sentTripKeys = [...sentKeys].slice(-500);\n\nreturn newTrips.map(trip => ({ json: trip }));"
+      },
+      "id": "c4d5e6f7-a8b9-0123-cdef-345678901234",
+      "name": "Filter New Trips",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [660, 300]
+    },
+    {
+      "parameters": {
+        "mode": "runOnceForEachItem",
+        "jsCode": "const trip = $input.item.json;\n\n// Расстояние: Traccar возвращает в метрах\nconst distanceKm = trip.distance / 1000;\nconst distanceStr = distanceKm.toFixed(1);\n\n// Длительность: в миллисекундах\nconst durationMs = trip.duration || 0;\nconst hours = Math.floor(durationMs / 3600000);\nconst mins = Math.floor((durationMs % 3600000) / 60000);\nconst durationStr = hours > 0 ? `${hours}ч ${mins}мин` : `${mins}мин`;\n\n// Скорость: Traccar хранит в узлах (knots) → км/ч (* 1.852)\nconst avgSpeedKmh = Math.round((trip.averageSpeed || 0) * 1.852);\nconst maxSpeedKmh = Math.round((trip.maxSpeed || 0) * 1.852);\nconst speedStr = maxSpeedKmh > 0\n  ? `${avgSpeedKmh} / ${maxSpeedKmh} км/ч (сред / макс)`\n  : `${avgSpeedKmh} км/ч (средняя)`;\n\n// Топливо: берём от OBD если есть, иначе считаем по расстоянию\nconst actualFuel = (trip.spentFuel != null && trip.spentFuel > 0)\n  ? parseFloat(trip.spentFuel)\n  : null;\nconst fuelL100km = parseFloat(process.env.FUEL_L100KM || '7.0');\nconst fuel = actualFuel !== null ? actualFuel : (distanceKm * fuelL100km / 100);\nconst fuelLabel = actualFuel !== null ? '' : ' (~расчёт)';\nconst fuelStr = `${fuel.toFixed(2)} л${fuelLabel}`;\n\n// Стоимость\nconst dieselPrice = parseFloat(process.env.DIESEL_PRICE_PLN || '6.50');\nconst cost = (fuel * dieselPrice).toFixed(2);\n\n// Форматирование времени (варшавский TZ)\nconst fmt = (isoStr) => new Date(isoStr).toLocaleString('ru-RU', {\n  timeZone: 'Europe/Warsaw',\n  day: '2-digit',\n  month: '2-digit',\n  hour: '2-digit',\n  minute: '2-digit'\n});\n\nconst lines = [\n  '🚗 *Поездка завершена*',\n  '',\n  `📍 ${trip.startAddress || '—'} → ${trip.endAddress || '—'}`,\n  '',\n  `📏 Расстояние: *${distanceStr} км*`,\n  `⏱ Время в пути: *${durationStr}*`,\n  `⚡ Скорость: ${speedStr}`,\n  `⛽ Топливо: *${fuelStr}*`,\n  `💰 Стоимость: *${cost} PLN* (${dieselPrice} PLN/л)`,\n  '',\n  `🕐 ${fmt(trip.startTime)} → ${fmt(trip.endTime)}`,\n];\n\nreturn [{\n  json: {\n    chat_id: process.env.TELEGRAM_CHAT_ID,\n    bot_token: process.env.TELEGRAM_BOT_TOKEN,\n    text: lines.join('\\n'),\n    parse_mode: 'Markdown'\n  }\n}];"
+      },
+      "id": "d5e6f7a8-b9c0-1234-defa-456789012345",
+      "name": "Format Message",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [880, 300]
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "=https://api.telegram.org/bot{{ $json.bot_token }}/sendMessage",
+        "sendBody": true,
+        "specifyBody": "keypair",
+        "bodyParameters": {
+          "parameters": [
+            {
+              "name": "chat_id",
+              "value": "={{ $json.chat_id }}"
+            },
+            {
+              "name": "text",
+              "value": "={{ $json.text }}"
+            },
+            {
+              "name": "parse_mode",
+              "value": "={{ $json.parse_mode }}"
+            }
+          ]
+        },
+        "options": {}
+      },
+      "id": "e6f7a8b9-c0d1-2345-efab-567890123456",
+      "name": "Send Telegram",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [1100, 300]
+    }
+  ],
+  "connections": {
+    "Every 15 Minutes": {
+      "main": [
+        [
+          {
+            "node": "Prepare Request",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Prepare Request": {
+      "main": [
+        [
+          {
+            "node": "Get Traccar Trips",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Get Traccar Trips": {
+      "main": [
+        [
+          {
+            "node": "Filter New Trips",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Filter New Trips": {
+      "main": [
+        [
+          {
+            "node": "Format Message",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Format Message": {
+      "main": [
+        [
+          {
+            "node": "Send Telegram",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    }
+  },
+  "active": false,
+  "settings": {
+    "executionOrder": "v1"
+  },
+  "versionId": "f7a8b9c0-d1e2-3456-fabc-678901234567",
+  "meta": {
+    "templateCredsSetupCompleted": true
+  },
+  "pinData": {}
+}
