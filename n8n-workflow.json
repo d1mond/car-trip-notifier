@@ -20,6 +20,35 @@
     },
     {
       "parameters": {
+        "method": "GET",
+        "url": "https://www.tolls.eu/fuel-prices",
+        "options": {
+          "response": {
+            "response": {
+              "responseFormat": "text"
+            }
+          }
+        }
+      },
+      "id": "f1a2b3c4-d5e6-7890-abcd-ef1234567891",
+      "name": "Get Fuel Prices",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [220, 300]
+    },
+    {
+      "parameters": {
+        "mode": "runOnceForAllItems",
+        "jsCode": "// Парсим актуальную цену дизеля в Польше с tolls.eu\n// Страница содержит строку Poland с тремя ценами: бензин | дизель | LPG\n// Формат: zł 6.72\nconst html = $input.first().json.data || '';\n\nlet dieselPrice = null;\nlet source = 'fallback';\n\nconst polandIdx = html.indexOf('Poland');\nif (polandIdx !== -1) {\n  // Смотрим 2000 символов после 'Poland' — там три ячейки с ценами\n  const section = html.substring(polandIdx, polandIdx + 2000);\n\n  // Ищем все цены в злотых: 'zł 6.72' или 'zł6.41'\n  const plnMatches = [...section.matchAll(/z\\u0142\\s*([0-9]+[.,][0-9]+)/g)];\n\n  if (plnMatches.length >= 2) {\n    // plnMatches[0] = бензин, plnMatches[1] = дизель\n    dieselPrice = parseFloat(plnMatches[1][1].replace(',', '.'));\n    source = 'tolls.eu';\n  }\n}\n\nconst staticData = $getWorkflowStaticData('global');\n\nif (!dieselPrice || isNaN(dieselPrice)) {\n  // Фолбэк: последняя известная цена или env var\n  dieselPrice = staticData.dieselPricePln\n    || parseFloat(process.env.DIESEL_PRICE_PLN || '6.50');\n  source = staticData.dieselPricePln ? 'cached' : 'env';\n}\n\n// Сохраняем для ноды Format Message\nstaticData.dieselPricePln = dieselPrice;\nstaticData.dieselPriceUpdated = new Date().toISOString();\n\nreturn [{ json: { dieselPrice, source } }];"
+      },
+      "id": "g2b3c4d5-e6f7-8901-bcde-f23456789012",
+      "name": "Extract Diesel Price",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [440, 300]
+    },
+    {
+      "parameters": {
         "mode": "runOnceForAllItems",
         "jsCode": "// Готовим Basic Auth и временной диапазон для запроса к Traccar\nconst username = process.env.TRACCAR_USERNAME || '';\nconst password = process.env.TRACCAR_PASSWORD || '';\nconst auth = Buffer.from(`${username}:${password}`).toString('base64');\n\nconst now = new Date();\n// Смотрим назад на 48 часов — подхватит поездки если n8n был недоступен\nconst from = new Date(now.getTime() - 48 * 60 * 60 * 1000).toISOString();\nconst to = now.toISOString();\n\nreturn [{\n  json: {\n    auth_header: `Basic ${auth}`,\n    device_id: process.env.TRACCAR_DEVICE_ID || '',\n    traccar_url: (process.env.TRACCAR_URL || '').replace(/\\/$/, ''),\n    from_time: from,\n    to_time: to\n  }\n}];"
       },
@@ -27,7 +56,7 @@
       "name": "Prepare Request",
       "type": "n8n-nodes-base.code",
       "typeVersion": 2,
-      "position": [220, 300]
+      "position": [660, 300]
     },
     {
       "parameters": {
@@ -69,7 +98,7 @@
       "name": "Get Traccar Trips",
       "type": "n8n-nodes-base.httpRequest",
       "typeVersion": 4.2,
-      "position": [440, 300]
+      "position": [880, 300]
     },
     {
       "parameters": {
@@ -80,18 +109,18 @@
       "name": "Filter New Trips",
       "type": "n8n-nodes-base.code",
       "typeVersion": 2,
-      "position": [660, 300]
+      "position": [1100, 300]
     },
     {
       "parameters": {
         "mode": "runOnceForEachItem",
-        "jsCode": "const trip = $input.item.json;\n\n// Расстояние: Traccar возвращает в метрах\nconst distanceKm = trip.distance / 1000;\nconst distanceStr = distanceKm.toFixed(1);\n\n// Длительность: в миллисекундах\nconst durationMs = trip.duration || 0;\nconst hours = Math.floor(durationMs / 3600000);\nconst mins = Math.floor((durationMs % 3600000) / 60000);\nconst durationStr = hours > 0 ? `${hours}ч ${mins}мин` : `${mins}мин`;\n\n// Скорость: Traccar хранит в узлах (knots) → км/ч (* 1.852)\nconst avgSpeedKmh = Math.round((trip.averageSpeed || 0) * 1.852);\nconst maxSpeedKmh = Math.round((trip.maxSpeed || 0) * 1.852);\nconst speedStr = maxSpeedKmh > 0\n  ? `${avgSpeedKmh} / ${maxSpeedKmh} км/ч (сред / макс)`\n  : `${avgSpeedKmh} км/ч (средняя)`;\n\n// Топливо: берём от OBD если есть, иначе считаем по расстоянию\nconst actualFuel = (trip.spentFuel != null && trip.spentFuel > 0)\n  ? parseFloat(trip.spentFuel)\n  : null;\nconst fuelL100km = parseFloat(process.env.FUEL_L100KM || '7.0');\nconst fuel = actualFuel !== null ? actualFuel : (distanceKm * fuelL100km / 100);\nconst fuelLabel = actualFuel !== null ? '' : ' (~расчёт)';\nconst fuelStr = `${fuel.toFixed(2)} л${fuelLabel}`;\n\n// Стоимость\nconst dieselPrice = parseFloat(process.env.DIESEL_PRICE_PLN || '6.50');\nconst cost = (fuel * dieselPrice).toFixed(2);\n\n// Форматирование времени (варшавский TZ)\nconst fmt = (isoStr) => new Date(isoStr).toLocaleString('ru-RU', {\n  timeZone: 'Europe/Warsaw',\n  day: '2-digit',\n  month: '2-digit',\n  hour: '2-digit',\n  minute: '2-digit'\n});\n\nconst lines = [\n  '🚗 *Поездка завершена*',\n  '',\n  `📍 ${trip.startAddress || '—'} → ${trip.endAddress || '—'}`,\n  '',\n  `📏 Расстояние: *${distanceStr} км*`,\n  `⏱ Время в пути: *${durationStr}*`,\n  `⚡ Скорость: ${speedStr}`,\n  `⛽ Топливо: *${fuelStr}*`,\n  `💰 Стоимость: *${cost} PLN* (${dieselPrice} PLN/л)`,\n  '',\n  `🕐 ${fmt(trip.startTime)} → ${fmt(trip.endTime)}`,\n];\n\nreturn [{\n  json: {\n    chat_id: process.env.TELEGRAM_CHAT_ID,\n    bot_token: process.env.TELEGRAM_BOT_TOKEN,\n    text: lines.join('\\n'),\n    parse_mode: 'Markdown'\n  }\n}];"
+        "jsCode": "const trip = $input.item.json;\n\n// Расстояние: Traccar возвращает в метрах\nconst distanceKm = trip.distance / 1000;\nconst distanceStr = distanceKm.toFixed(1);\n\n// Длительность: в миллисекундах\nconst durationMs = trip.duration || 0;\nconst hours = Math.floor(durationMs / 3600000);\nconst mins = Math.floor((durationMs % 3600000) / 60000);\nconst durationStr = hours > 0 ? `${hours}ч ${mins}мин` : `${mins}мин`;\n\n// Скорость: Traccar хранит в узлах (knots) → км/ч (* 1.852)\nconst avgSpeedKmh = Math.round((trip.averageSpeed || 0) * 1.852);\nconst maxSpeedKmh = Math.round((trip.maxSpeed || 0) * 1.852);\nconst speedStr = maxSpeedKmh > 0\n  ? `${avgSpeedKmh} / ${maxSpeedKmh} км/ч (сред / макс)`\n  : `${avgSpeedKmh} км/ч (средняя)`;\n\n// Топливо: берём от OBD если есть, иначе считаем по расстоянию\nconst actualFuel = (trip.spentFuel != null && trip.spentFuel > 0)\n  ? parseFloat(trip.spentFuel)\n  : null;\nconst fuelL100km = parseFloat(process.env.FUEL_L100KM || '7.0');\nconst fuel = actualFuel !== null ? actualFuel : (distanceKm * fuelL100km / 100);\nconst fuelLabel = actualFuel !== null ? '' : ' (~расчёт)';\nconst fuelStr = `${fuel.toFixed(2)} л${fuelLabel}`;\n\n// Цена дизеля: берём из static data (обновляется каждый запуск с tolls.eu)\nconst staticData = $getWorkflowStaticData('global');\nconst dieselPrice = staticData.dieselPricePln\n  || parseFloat(process.env.DIESEL_PRICE_PLN || '6.50');\nconst cost = (fuel * dieselPrice).toFixed(2);\n\n// Форматирование времени (варшавский TZ)\nconst fmt = (isoStr) => new Date(isoStr).toLocaleString('ru-RU', {\n  timeZone: 'Europe/Warsaw',\n  day: '2-digit',\n  month: '2-digit',\n  hour: '2-digit',\n  minute: '2-digit'\n});\n\nconst lines = [\n  '\\u{1F697} *Поездка завершена*',\n  '',\n  `\\u{1F4CD} ${trip.startAddress || '\\u2014'} \\u2192 ${trip.endAddress || '\\u2014'}`,\n  '',\n  `\\u{1F4CF} Расстояние: *${distanceStr} км*`,\n  `\\u23F1 Время в пути: *${durationStr}*`,\n  `\\u26A1 Скорость: ${speedStr}`,\n  `\\u26FD Топливо: *${fuelStr}*`,\n  `\\u{1F4B0} Стоимость: *${cost} PLN* (${dieselPrice} PLN/л)`,\n  '',\n  `\\u{1F550} ${fmt(trip.startTime)} \\u2192 ${fmt(trip.endTime)}`,\n];\n\nreturn [{\n  json: {\n    chat_id: process.env.TELEGRAM_CHAT_ID,\n    bot_token: process.env.TELEGRAM_BOT_TOKEN,\n    text: lines.join('\\n'),\n    parse_mode: 'Markdown'\n  }\n}];"
       },
       "id": "d5e6f7a8-b9c0-1234-defa-456789012345",
       "name": "Format Message",
       "type": "n8n-nodes-base.code",
       "typeVersion": 2,
-      "position": [880, 300]
+      "position": [1320, 300]
     },
     {
       "parameters": {
@@ -121,11 +150,33 @@
       "name": "Send Telegram",
       "type": "n8n-nodes-base.httpRequest",
       "typeVersion": 4.2,
-      "position": [1100, 300]
+      "position": [1540, 300]
     }
   ],
   "connections": {
     "Every 15 Minutes": {
+      "main": [
+        [
+          {
+            "node": "Get Fuel Prices",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Get Fuel Prices": {
+      "main": [
+        [
+          {
+            "node": "Extract Diesel Price",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Extract Diesel Price": {
       "main": [
         [
           {
