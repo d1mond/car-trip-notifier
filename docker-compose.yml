@@ -9,6 +9,8 @@ services:
       - N8N_ENCRYPTION_KEY=${N8N_ENCRYPTION_KEY}
       - GENERIC_TIMEZONE=Europe/Warsaw
       - TZ=Europe/Warsaw
+      # Разрешаем Code-ноде делать https запросы (для fetching цены дизеля)
+      - NODE_FUNCTION_ALLOW_BUILTIN=https,http,url
       # Traccar
       - TRACCAR_URL=${TRACCAR_URL}
       - TRACCAR_DEVICE_ID=${TRACCAR_DEVICE_ID}
@@ -17,8 +19,6 @@ services:
       # Telegram
       - TELEGRAM_BOT_TOKEN=${TELEGRAM_BOT_TOKEN}
       - TELEGRAM_CHAT_ID=${TELEGRAM_CHAT_ID}
-      # Цена дизеля (PLN/литр)
-      - DIESEL_PRICE_PLN=${DIESEL_PRICE_PLN:-6.50}
       # Средний расход л/100км (если OBD не передаёт spentFuel)
       - FUEL_L100KM=${FUEL_L100KM:-7.0}
     volumes:
